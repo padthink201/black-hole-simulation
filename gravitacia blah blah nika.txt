@@ -1,0 +1,49 @@
+Short version: gravitational waves from other collisions make essentially no difference. Two supermassive black holes stuck at a parsec apart would take roughly 290 billion years to merge from gravitational waves alone. That’s about 20 times the current age of the universe. Real pairs probably merge much faster, but because of stars and gas, not waves.
+
+Setup
+
+My example is two black holes of a billion Suns each, 1 parsec apart (about 3.3 light-years). That’s the “final parsec”: the distance where the classic problem says they stall.
+
+Orbit period: about 2,100 years
+Orbits in the age of the universe: about 6.6 million
+1. Do other mergers’ gravitational waves affect them?
+
+The background hum. Every merging pair of supermassive black holes in the universe adds to a faint background of gravitational waves. Pulsar-timing experiments detected it in 2023. I took its measured strength, extrapolated it to the frequency this binary is sensitive to (about 3×10⁻¹¹ Hz), and simulated 6.6 million orbits of random kicks, 200 runs:
+
+	Change in orbit size
+Random kicks (realistic), worst of 200 runs	0.0000002% (2×10⁻⁹)
+Every kick pushing the same way (impossible upper limit)	0.0002% (2×10⁻⁶)
+Effect on merger time	~2,800 years out of 290 billion
+
+A single nearby blast. Here’s the peak strain (how much space gets stretched) from one passing burst:
+
+Source	Strain
+Two billion-Sun black holes merging 1 Mpc away (about 1.5× the distance to Andromeda)	5×10⁻¹¹
+The same merger 100 Mpc away	5×10⁻¹³
+A stellar black hole merger (30 Suns) 1,000 light-years away	1×10⁻¹⁵
+
+A strain of 10⁻¹¹ stretches the orbit by about one part in 100 billion for a moment, and then it passes. Stellar-mass mergers are also at completely the wrong frequency, hundreds of hertz against an orbit lasting 2,000 years, so the binary barely responds at all.
+
+Why the effect is so tiny: gravitational waves are incredibly weak by the time they reach anything. The pair’s own gravity holds the orbit together roughly a trillion times more strongly than any passing wave can disturb it.
+
+2. How long until they collide?
+
+This uses the standard formula for how fast gravitational waves shrink an orbit (Peters, 1964), starting at 1 parsec. “Eccentricity” is how stretched the orbit is: 0 is a circle, and values near 1 are long, thin ellipses.
+
+Each black hole	Circular orbit	Eccentricity 0.9	Eccentricity 0.99
+1 million Suns	3×10²⁰ yr	2×10¹⁸ yr	6×10¹⁴ yr
+100 million Suns	3×10¹⁴ yr	2×10¹² yr	6×10⁸ yr
+1 billion Suns	290 billion yr	1.6 billion yr	580,000 yr
+10 billion Suns	290 million yr	1.6 million yr	580 yr
+
+Two patterns stand out:
+
+Heavier pairs merge much faster. Ten times the mass means a thousand times quicker, because the time scales with 1/mass³.
+Stretched orbits merge dramatically faster. At their closest point the black holes swing very near each other and give off huge bursts of waves.
+3. So how do real ones merge?
+
+Your last simulation answered this: friction from stars and gas. Stars that pass close get flung out and carry orbital energy away with them. Gas drags on the pair, and both can also stretch the orbit, which speeds up the end. Realistic estimates for getting through the final parsec range from about 100 million to a few billion years. The background hum the pulsar experiments detected suggests these mergers really do happen, so nature solves the final parsec problem somehow.
+
+Caveats: these are order-of-magnitude numbers. The background strength comes from extrapolating the pulsar-timing measurement to frequencies below where it was actually measured, and the eccentric merger times use a common approximation for stretched orbits.
+
+I didn’t make an animation of the wave effect, because at real strength nothing on screen would visibly move. If you want, I can build a version with an “exaggerate waves ×10⁹” slider, so you can see how strong the waves would have to be to matter.
