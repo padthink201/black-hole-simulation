@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Binary Black Hole Merger</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  canvas:active { cursor: grabbing; }
+  #hint {
+    position: fixed; left: 16px; bottom: 14px; color: #9aa; opacity: .7;
+    font: 13px/1.4 system-ui, sans-serif; pointer-events: none;
+  }
+  #panel {
+    position: fixed; left: 16px; top: 16px; padding: 12px 14px; border-radius: 10px;
+    background: rgba(10, 10, 16, .6); color: #dde; backdrop-filter: blur(6px);
+    font: 13px/1.5 system-ui, sans-serif; width: min(250px, calc(100vw - 60px));
+  }
+  #panel label { display: flex; justify-content: space-between; }
+  #panel input { width: 100%; margin: 4px 0 8px; }
+  #panel button {
+    width: 100%; padding: 6px; margin-top: 8px; border: 1px solid #556; border-radius: 6px;
+    background: #222233; color: #dde; font: inherit; cursor: pointer;
+  }
+  #panel button:hover { background: #2d2d44; }
+  #phase { font-weight: 600; color: #ffcf8a; margin-bottom: 6px; }
+  .bar { height: 6px; border-radius: 3px; background: #222; margin: 2px 0 6px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; transition: width .2s; }
+  #fBar { background: #ff9a3c; }
+  #gBar { background: #7fb2ff; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="panel">
+  <div id="phase">Dynamical friction</div>
+  <div>Separation: <b id="sep">–</b></div>
+  <div style="margin-top:6px">Energy lost to gas friction</div>
+  <div class="bar"><div id="fBar"></div></div>
+  <div>Energy lost to gravitational waves</div>
+  <div class="bar"><div id="gBar"></div></div>
+  <label>Gas amount <span id="gasVal"></span></label>
+  <input id="gas" type="range" min="0" max="1" step="0.01" value="0.5">
+  <label>Speed <span id="spdVal"></span></label>
+  <input id="spd" type="range" min="0.25" max="4" step="0.05" value="1">
+  <button id="restart">Restart</button>
+</div>
+<div id="hint">Drag to orbit · Scroll / pinch to zoom</div>
+
+<!-- ===== Pass 1: ray-traced black holes, mini accretion disks, starfield ===== -->
+<script id="vs" type="x-shader/x-vertex">
+attribute vec2 aPos;
+void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script id="fs" type="x-shader/x-fragment">
+precision highp float;
+
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec3  uCamPos;
+uniform mat3  uCamRot;
+uniform vec4  uBH[2];       // xyz = position, w = Schwarzschild radius (0 = absent)
+uniform float uRout[2];     // outer radius of each mini accretion disk
+uniform vec2  uMergeUV;     // screen position of the merger
+uniform float uWaveR;       // gravitational-wave ripple radius (screen units)
+uniform float uWaveA;       // ripple strength
+uniform float uFlash;       // merger flash brightness
+
+const int STEPS = 300;
+
+float hash(vec3 p) {
+  p = fract(p * 0.3183099 + 0.1);
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+float noise(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(mix(hash(i),                 hash(i + vec3(1,0,0)), f.x),
+                 mix(hash(i + vec3(0,1,0)),   hash(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash(i + vec3(0,0,1)),   hash(i + vec3(1,0,1)), f.x),
+                 mix(hash(i + vec3(0,1,1)),   hash(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+float fbm(vec3 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
+  return v;
+}
+
+vec3 sky(vec3 d) {
+  vec3 col = vec3(0.0);
+  col += vec3(0.10, 0.05, 0.16) * pow(fbm(d * 2.5 + 3.0), 3.0) * 1.6;
+  col += vec3(0.02, 0.06, 0.12) * pow(fbm(d * 4.0 - 7.0), 4.0) * 2.0;
+  for (int i = 0; i < 3; i++) {
+    float s = 90.0 + float(i) * 110.0;
+    vec3 p = d * s;
+    vec3 id = floor(p);
+    vec3 f = fract(p) - 0.5;
+    float h = hash(id + float(i) * 17.13);
+    if (h > 0.965) {
+      float b = smoothstep(0.22, 0.0, length(f)) * (h - 0.965) * 28.0;
+      vec3 tint = mix(vec3(0.7, 0.8, 1.0), vec3(1.0, 0.85, 0.6), hash(id * 3.1));
+      col += tint * b;
+    }
+  }
+  return col;
+}
+
+vec3 diskColor(float t) {
+  vec3 c1 = vec3(0.45, 0.06, 0.01);
+  vec3 c2 = vec3(1.00, 0.45, 0.10);
+  vec3 c3 = vec3(1.00, 0.88, 0.65);
+  vec3 c4 = vec3(0.85, 0.92, 1.00);
+  if (t < 0.4) return mix(c1, c2, t / 0.4);
+  if (t < 0.8) return mix(c2, c3, (t - 0.4) / 0.4);
+  return mix(c3, c4, (t - 0.8) / 0.2);
+}
+
+// accretion disk around one black hole; p is relative to the hole, in its y=0 plane
+vec4 sampleDisk(vec3 p, vec3 rd, float rs, float rout, float seed) {
+  float r = length(p.xz) / rs;          // radius in units of Rs
+  float rin = 2.6, ro = rout / rs;
+  if (ro <= rin || r < rin || r > ro) return vec4(0.0);
+
+  float ang = atan(p.z, p.x);
+  float a = ang - uTime * 3.2 / pow(r, 1.5);
+  vec3 q = vec3(r * 1.4 + seed, cos(a) * 2.2, sin(a) * 2.2);
+  float turb = fbm(q * 1.2 + vec3(0.0, 0.0, uTime * 0.05));
+  float clumps = fbm(vec3(r * 3.0, cos(a) * 4.0, sin(a) * 4.0) + seed + uTime * 0.03);
+  float dens = turb * (0.7 + 0.3 * sin(r * 5.0 + turb * 12.0)) * (0.5 + clumps);
+
+  float x = (r - rin) / (ro - rin);
+  float edge = smoothstep(0.0, 0.05, x) * smoothstep(1.0, 0.5, x);
+  float temp = pow(1.0 - x, 1.6);
+  vec3 vel = normalize(vec3(-p.z, 0.0, p.x)) * sqrt(0.5 / r) * 1.4;
+  float dop = 1.0 / (1.0 + dot(vel, rd));
+  float grav = sqrt(max(1.0 - 1.0 / r, 0.0));
+
+  vec3 col = diskColor(clamp(temp * dop * grav * 1.05, 0.0, 1.0));
+  float intensity = dens * edge * (0.6 + 3.5 * temp) * pow(dop, 3.5) * grav;
+  return vec4(col * intensity, clamp(dens * edge * 1.4, 0.0, 1.0));
+}
+
+void main() {
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+
+  // gravitational-wave ripple: rings of space-stretching spreading from the merger
+  vec2 dm = uv - uMergeUV;
+  float dd = length(dm);
+  if (uWaveA > 0.001) {
+    float x = dd - uWaveR;
+    uv += dm / max(dd, 1e-4) * uWaveA * 0.025 * sin(x * 70.0) * exp(-x * x * 25.0);
+  }
+
+  vec3 rd = normalize(uCamRot * vec3(uv, 1.6));
+  vec3 pos = uCamPos;
+  vec3 vel = rd;
+
+  vec3 col = vec3(0.0);
+  float alpha = 0.0;
+  float glow = 0.0;
+  bool captured = false;
+
+  for (int i = 0; i < STEPS; i++) {
+    vec3 acc = vec3(0.0);
+    float dmin = 1e9;
+    for (int k = 0; k < 2; k++) {
+      vec4 b = uBH[k];
+      if (b.w <= 0.0) continue;
+      vec3 rel = pos - b.xyz;
+      float r2 = dot(rel, rel);
+      float r = sqrt(r2);
+      if (r < b.w) captured = true;
+      // light bending around each hole (Schwarzschild photon orbit equation)
+      vec3 h = cross(rel, vel);
+      acc += -1.5 * b.w * dot(h, h) * rel / (r2 * r2 * r);
+      dmin = min(dmin, r);
+      glow += exp(-abs(r / b.w - 1.5) * 6.0) * 0.0015 * r;
+    }
+    if (captured) break;
+    float R = length(pos);
+    if (R > 160.0 && dot(pos, vel) > 0.0) break;
+
+    float dt = clamp(0.06 * dmin, 0.02, 2.0);
+    vec3 nvel = vel + acc * dt;
+    vec3 npos = pos + nvel * dt;
+
+    // crossed the orbital plane: sample both mini-disks
+    if (pos.y * npos.y < 0.0) {
+      float t = pos.y / (pos.y - npos.y);
+      vec3 hit = mix(pos, npos, t);
+      vec3 nd = normalize(nvel);
+      for (int k = 0; k < 2; k++) {
+        vec4 b = uBH[k];
+        if (b.w <= 0.0) continue;
+        vec4 d = sampleDisk(hit - b.xyz, nd, b.w, uRout[k], float(k) * 7.3);
+        col += (1.0 - alpha) * d.rgb;
+        alpha += (1.0 - alpha) * d.a;
+      }
+      if (alpha > 0.99) break;
+    }
+    pos = npos;
+    vel = nvel;
+  }
+
+  if (!captured) {
+    col += (1.0 - alpha) * sky(normalize(vel));
+    col += vec3(1.0, 0.7, 0.4) * glow * (1.0 - alpha);
+  }
+  col += vec3(1.0, 0.92, 0.85) * uFlash * 0.012 / (dd * dd + 0.004);
+
+  col = 1.0 - exp(-col * 1.4);
+  col = pow(col, vec3(0.4545));
+  col *= 1.0 - 0.35 * dot(uv, uv);
+  gl_FragColor = vec4(col, 1.0);
+}
+</script>
+
+<!-- ===== Pass 2: gas particles, with point-lens bending by each hole ===== -->
+<script id="gvs" type="x-shader/x-vertex">
+attribute vec4 aGas;          // xyz = position, w = heat
+uniform vec2  uRes;
+uniform vec3  uCamPos;
+uniform mat3  uCamRot;
+uniform vec4  uBH[2];
+uniform float uBright;
+varying vec3  vCol;
+
+vec3 toCam(vec3 p) {
+  vec3 d = p - uCamPos;
+  return vec3(dot(d, uCamRot[0]), dot(d, uCamRot[1]), dot(d, uCamRot[2]));
+}
+
+void main() {
+  vec3 c = toCam(aGas.xyz);
+  if (c.z < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); gl_PointSize = 0.0; return; }
+  vec2 s = c.xy / c.z * 1.6;
+
+  // gas behind a hole is lensed: thin-lens equation for a point mass,
+  // theta = (beta + sqrt(beta^2 + 4 thetaE^2)) / 2
+  for (int k = 0; k < 2; k++) {
+    vec4 b = uBH[k];
+    if (b.w <= 0.0) continue;
+    vec3 bc = toCam(b.xyz);
+    if (bc.z <= 0.5 || c.z <= bc.z) continue;
+    vec2 bs = bc.xy / bc.z * 1.6;
+    vec2 beta = s - bs;
+    float bl = max(length(beta), 1e-5);
+    float thE2 = 2.0 * b.w * (c.z - bc.z) / (bc.z * c.z) * 2.56;
+    float th = 0.5 * (bl + sqrt(bl * bl + 4.0 * thE2));
+    s = bs + beta / bl * th;
+  }
+
+  gl_Position = vec4(s.x * 2.0 * uRes.y / uRes.x, s.y * 2.0, 0.0, 1.0);
+  gl_PointSize = clamp(uRes.y * 0.45 / c.z, 2.0, 32.0);
+
+  float h = clamp(aGas.w, 0.0, 1.0);
+  vec3 cold = vec3(0.25, 0.18, 0.45);
+  vec3 warm = vec3(1.0, 0.45, 0.12);
+  vec3 hot  = vec3(1.0, 0.9, 0.75);
+  vCol = (h < 0.5 ? mix(cold, warm, h * 2.0) : mix(warm, hot, h * 2.0 - 1.0))
+         * (0.12 + 0.6 * h) * uBright;
+}
+</script>
+
+<script id="gfs" type="x-shader/x-fragment">
+precision mediump float;
+varying vec3 vCol;
+void main() {
+  vec2 q = gl_PointCoord - 0.5;
+  float a = exp(-dot(q, q) * 14.0);
+  gl_FragColor = vec4(vCol * a, 1.0);
+}
+</script>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  const gl = canvas.getContext('webgl', { antialias: false });
+  if (!gl) { document.body.innerHTML = '<p style="color:#fff;font-family:sans-serif;padding:16px">WebGL is not available.</p>'; return; }
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  }
+  function program(vsId, fsId) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById(vsId).textContent));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, document.getElementById(fsId).textContent));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+    const u = {};
+    const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) {
+      const name = gl.getActiveUniform(p, i).name.replace(/\[0\]$/, '');
+      u[name] = gl.getUniformLocation(p, name);
+    }
+    return { p, u };
+  }
+  const sky = program('vs', 'fs');
+  const gasProg = program('gvs', 'gfs');
+
+  const quad = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(sky.p, 'aPos');
+  const aGas = gl.getAttribLocation(gasProg.p, 'aGas');
+
+  const SCALE = Math.min(window.devicePixelRatio || 1, 1.5) * 0.7;
+  function resize() {
+    canvas.width = Math.floor(innerWidth * SCALE);
+    canvas.height = Math.floor(innerHeight * SCALE);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
+  addEventListener('resize', resize);
+  resize();
+
+  // ---------- physics ----------
+  // Units: G = c = 1, total black-hole mass starts at 1, so each hole has Rs = 2m = 1.
+  // Black holes attract each other through the Paczynski-Wiita potential (Newtonian
+  // gravity tweaked so orbits closer than 3 Rs are unstable and plunge, as in GR).
+  // Gas particles feel both holes, and each hole feels every gas particle back.
+  // Dynamical friction is not added by hand: it emerges from those pulls, as gas
+  // is gathered into a dense wake behind each moving hole and drags on it.
+  // Gravitational-wave losses use the Peters (1964) formula, which takes over at the end.
+  const N = 4000;
+  const EPS2 = 0.5;             // gravitational softening for gas (avoids infinite kicks)
+  const BASE_TIME_SCALE = 40;   // sim time per real second at speed 1
+  const START_SEP = 26;
+  const RAMP = 300;             // sim time over which the gas's gravity is switched on
+
+  const px = new Float32Array(N * 3), pv = new Float32Array(N * 3);
+  const gasGPU = new Float32Array(N * 4);
+  const gasBuf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, gasBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, gasGPU.byteLength, gl.DYNAMIC_DRAW);
+
+  const gasInput = document.getElementById('gas'), spdInput = document.getElementById('spd');
+  const gasVal = document.getElementById('gasVal'), spdVal = document.getElementById('spdVal');
+  let gasMass = +gasInput.value, speed = +spdInput.value;
+  const showSliders = () => {
+    gasVal.textContent = gasMass.toFixed(2);
+    spdVal.textContent = speed.toFixed(2) + '×';
+  };
+  gasInput.addEventListener('input', () => { gasMass = +gasInput.value; showSliders(); });
+  spdInput.addEventListener('input', () => { speed = +spdInput.value; showSliders(); });
+  showSliders();
+
+  let bh, merged, mergeTime, mergePos, simTime, pFric, pGW;
+
+  function spawnGas(j, r) {
+    const th = Math.random() * Math.PI * 2;
+    const y = (Math.random() + Math.random() - 1) * 0.3 * r;
+    px[j * 3] = r * Math.cos(th); px[j * 3 + 1] = y; px[j * 3 + 2] = r * Math.sin(th);
+    const M = bh.reduce((s, b) => s + b.m, 0);
+    // turbulent, slower-than-orbital gas: lots of motion relative to the holes = strong drag
+    const v = Math.sqrt(M / r) * (0.6 + 0.3 * Math.random());
+    const disp = 0.4 * v;
+    pv[j * 3]     = -Math.sin(th) * v + (Math.random() - 0.5) * disp;
+    pv[j * 3 + 1] = (Math.random() - 0.5) * disp;
+    pv[j * 3 + 2] =  Math.cos(th) * v + (Math.random() - 0.5) * disp;
+  }
+
+  function reset() {
+    const m = 0.5, sep = START_SEP, Rtot = 2 * 2 * m;
+    const vrel = Math.sqrt(2 * m * sep) / (sep - Rtot);   // circular orbit
+    bh = [
+      { p: [ sep / 2, 0, 0], v: [0, 0,  vrel / 2], m },
+      { p: [-sep / 2, 0, 0], v: [0, 0, -vrel / 2], m },
+    ];
+    merged = false; mergeTime = -1; mergePos = [0, 0, 0]; simTime = 0; pFric = 0; pGW = 0;
+    // gas cloud around the pair's orbit (none in the middle, which they would sweep out)
+    for (let j = 0; j < N; j++) spawnGas(j, 9 + 30 * Math.pow(Math.random(), 1.5));
+  }
+  reset();
+  document.getElementById('restart').addEventListener('click', reset);
+
+  function separation() {
+    if (merged) return 0;
+    return Math.hypot(bh[0].p[0] - bh[1].p[0], bh[0].p[1] - bh[1].p[1], bh[0].p[2] - bh[1].p[2]);
+  }
+
+  function step(dt) {
+    const nb = bh.length;
+    const acc = bh.map(() => [0, 0, 0]);
+    const fGas = bh.map(() => [0, 0, 0]);
+    // gas gravity fades in at the start so the orbit adjusts smoothly instead of being jolted
+    const mp = gasMass / N * Math.min(1, simTime / RAMP);
+
+    // hole-hole gravity + gravitational-wave energy loss
+    if (nb === 2) {
+      const [b1, b2] = bh;
+      const d = [b1.p[0] - b2.p[0], b1.p[1] - b2.p[1], b1.p[2] - b2.p[2]];
+      const r = Math.hypot(...d);
+      const M = b1.m + b2.m, Rtot = 2 * M;
+      if (r < Rtot * 1.15) { merge(); return; }
+      const f = b1.m * b2.m / ((r - Rtot) * (r - Rtot));
+      // Peters: power radiated by a circular binary, applied as a drag on the relative orbit
+      const P = 6.4 * b1.m * b1.m * b2.m * b2.m * M / Math.pow(r, 5);
+      const vr = [b1.v[0] - b2.v[0], b1.v[1] - b2.v[1], b1.v[2] - b2.v[2]];
+      const vr2 = vr[0] * vr[0] + vr[1] * vr[1] + vr[2] * vr[2] || 1e-9;
+      for (let i = 0; i < 3; i++) {
+        const Fi = -f * d[i] / r - P / vr2 * vr[i];
+        acc[0][i] += Fi / b1.m;
+        acc[1][i] -= Fi / b2.m;
+      }
+      pGW = P;
+    } else pGW = 0;
+
+    // gas <-> holes
+    for (let j = 0; j < N; j++) {
+      const j3 = j * 3;
+      let ax = 0, ay = 0, az = 0, eaten = false;
+      for (let k = 0; k < nb; k++) {
+        const b = bh[k];
+        const dx = b.p[0] - px[j3], dy = b.p[1] - px[j3 + 1], dz = b.p[2] - px[j3 + 2];
+        const r2 = dx * dx + dy * dy + dz * dz;
+        const rs = 2 * b.m;
+        if (r2 < rs * rs) {
+          // swallowed: the hole takes the particle's mass and momentum
+          const mt = b.m + mp;
+          for (let i = 0; i < 3; i++) b.v[i] = (b.m * b.v[i] + mp * pv[j3 + i]) / mt;
+          b.m = mt;
+          eaten = true;
+          break;
+        }
+        const inv = 1 / ((r2 + EPS2) * Math.sqrt(r2 + EPS2));
+        ax += b.m * inv * dx; ay += b.m * inv * dy; az += b.m * inv * dz;
+        fGas[k][0] -= mp * inv * dx; fGas[k][1] -= mp * inv * dy; fGas[k][2] -= mp * inv * dz;
+      }
+      if (eaten || px[j3] * px[j3] + px[j3 + 1] * px[j3 + 1] + px[j3 + 2] * px[j3 + 2] > 150 * 150) {
+        spawnGas(j, 35 + 15 * Math.random());
+        continue;
+      }
+      pv[j3] += ax * dt; pv[j3 + 1] += ay * dt; pv[j3 + 2] += az * dt;
+      px[j3] += pv[j3] * dt; px[j3 + 1] += pv[j3 + 1] * dt; px[j3 + 2] += pv[j3 + 2] * dt;
+    }
+
+    // energy the gas drains from the holes' motion (relative to their centre of mass)
+    const Mt = bh.reduce((s, b) => s + b.m, 0);
+    const vcm = [0, 1, 2].map(i => bh.reduce((s, b) => s + b.m * b.v[i], 0) / Mt);
+    let P = 0;
+    for (let k = 0; k < nb; k++) {
+      for (let i = 0; i < 3; i++) P += fGas[k][i] * (bh[k].v[i] - vcm[i]);
+    }
+    pFric = pFric * 0.995 + Math.max(-P, 0) * 0.005;
+
+    for (let k = 0; k < nb; k++) {
+      const b = bh[k];
+      for (let i = 0; i < 3; i++) {
+        b.v[i] += (acc[k][i] + fGas[k][i] / b.m) * dt;
+        b.p[i] += b.v[i] * dt;
+      }
+    }
+    simTime += dt;
+  }
+
+  function merge() {
+    const [b1, b2] = bh;
+    const M = b1.m + b2.m;
+    const p = [0, 1, 2].map(i => (b1.m * b1.p[i] + b2.m * b2.p[i]) / M);
+    const v = [0, 1, 2].map(i => (b1.m * b1.v[i] + b2.m * b2.v[i]) / M);
+    // ~5% of the mass is radiated away as gravitational waves in the final instant
+    bh = [{ p, v, m: 0.95 * M }];
+    merged = true;
+    mergeTime = performance.now();
+    mergePos = p.slice();
+  }
+
+  function advance(simDt) {
+    let left = simDt, guard = 0;
+    while (left > 1e-6 && guard++ < 400) {
+      const sep = separation();
+      const dt = Math.min(left, merged ? 0.15 : Math.min(0.15, 0.008 * Math.pow(sep, 1.5)));
+      step(dt);
+      left -= dt;
+    }
+  }
+
+  // ---------- camera ----------
+  let yaw = 0.3, pitch = 0.42, dist = 70, dragging = false, lastX = 0, lastY = 0, idle = 0;
+  const pointers = new Map();
+  let pinchStart = 0, distStart = dist;
+  canvas.addEventListener('pointerdown', e => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, [e.clientX, e.clientY]);
+    dragging = true; lastX = e.clientX; lastY = e.clientY; idle = 0;
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      pinchStart = Math.hypot(a[0] - b[0], a[1] - b[1]); distStart = dist;
+    }
+  });
+  canvas.addEventListener('pointermove', e => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, [e.clientX, e.clientY]);
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      dist = Math.min(150, Math.max(12, distStart * pinchStart / Math.hypot(a[0] - b[0], a[1] - b[1])));
+      return;
+    }
+    if (!dragging) return;
+    yaw -= (e.clientX - lastX) * 0.005;
+    pitch = Math.max(-1.45, Math.min(1.45, pitch + (e.clientY - lastY) * 0.005));
+    lastX = e.clientX; lastY = e.clientY; idle = 0;
+  });
+  const up = e => { pointers.delete(e.pointerId); if (pointers.size === 0) dragging = false; };
+  canvas.addEventListener('pointerup', up);
+  canvas.addEventListener('pointercancel', up);
+  canvas.addEventListener('wheel', e => {
+    e.preventDefault();
+    dist = Math.min(150, Math.max(12, dist * Math.exp(e.deltaY * 0.001)));
+  }, { passive: false });
+
+  // ---------- UI readouts ----------
+  const phaseEl = document.getElementById('phase'), sepEl = document.getElementById('sep');
+  const fBar = document.getElementById('fBar'), gBar = document.getElementById('gBar');
+  const barWidth = p => Math.max(0, Math.min(100, (Math.log10(p + 1e-12) + 9) / 7 * 100)) + '%';
+  function updateUI() {
+    if (merged) {
+      phaseEl.textContent = 'Merged — one black hole, ringing down';
+      sepEl.textContent = '0';
+    } else {
+      phaseEl.textContent = pGW > pFric ? 'Gravitational waves take over' : 'Dynamical friction';
+      sepEl.textContent = separation().toFixed(1) + ' Rs';
+    }
+    fBar.style.width = barWidth(merged ? 0 : pFric);
+    gBar.style.width = barWidth(merged ? 0 : pGW);
+  }
+
+  // for poking at from the console: binarySim.advance(500), binarySim.state()
+  window.binarySim = {
+    advance, reset,
+    state: () => ({ merged, sep: separation(), simTime, pFric, pGW, masses: bh.map(b => b.m) }),
+  };
+
+  // ---------- render loop ----------
+  const t0 = performance.now();
+  let last = t0, uiClock = 0;
+  function frame(now) {
+    const realDt = Math.min((now - last) / 1000, 0.05); last = now;
+    idle += realDt;
+    if (!dragging && idle > 2) yaw += realDt * 0.06;
+
+    advance(realDt * BASE_TIME_SCALE * speed);
+
+    const cp = Math.cos(pitch), sp = Math.sin(pitch), cy = Math.cos(yaw), sy = Math.sin(yaw);
+    const cam = [dist * cp * sy, dist * sp, -dist * cp * cy];
+    const f = cam.map(v => -v / dist);
+    let r = [f[2], 0, -f[0]];
+    const rl = Math.hypot(r[0], r[2]) || 1; r = [r[0] / rl, 0, r[2] / rl];
+    const u = [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]];
+    const rot = [...r, ...u, ...f];
+
+    const bhData = new Float32Array(8), rout = new Float32Array(2);
+    const sep = separation();
+    bh.forEach((b, k) => {
+      const rs = 2 * b.m;
+      bhData.set([b.p[0], b.p[1], b.p[2], rs], k * 4);
+      rout[k] = merged ? 9 * rs : Math.min(7 * rs, 0.38 * sep);
+    });
+
+    // merger flash + gravitational-wave ripple, in screen coordinates
+    let flash = 0, waveR = 0, waveA = 0, mUV = [0, 0];
+    if (merged) {
+      const ts = (now - mergeTime) / 1000;
+      flash = Math.exp(-ts * 2.5);
+      waveR = ts * 0.45;
+      waveA = Math.exp(-ts * 0.6);
+      const d = mergePos.map((v, i) => v - cam[i]);
+      const cz = d[0] * f[0] + d[1] * f[1] + d[2] * f[2];
+      mUV = [(d[0] * r[0] + d[1] * r[1] + d[2] * r[2]) / cz * 1.6, (d[0] * u[0] + d[1] * u[1] + d[2] * u[2]) / cz * 1.6];
+    }
+
+    // pass 1: black holes + disks + sky
+    gl.disable(gl.BLEND);
+    gl.useProgram(sky.p);
+    gl.bindBuffer(gl.ARRAY_BUFFER, quad);
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(sky.u.uRes, canvas.width, canvas.height);
+    gl.uniform1f(sky.u.uTime, (now - t0) / 1000);
+    gl.uniform3fv(sky.u.uCamPos, cam);
+    gl.uniformMatrix3fv(sky.u.uCamRot, false, rot);
+    gl.uniform4fv(sky.u.uBH, bhData);
+    gl.uniform1fv(sky.u.uRout, rout);
+    gl.uniform2fv(sky.u.uMergeUV, mUV);
+    gl.uniform1f(sky.u.uWaveR, waveR);
+    gl.uniform1f(sky.u.uWaveA, waveA);
+    gl.uniform1f(sky.u.uFlash, flash);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.disableVertexAttribArray(aPos);
+
+    // pass 2: gas, glowing hotter near the holes
+    for (let j = 0; j < N; j++) {
+      const x = px[j * 3], y = px[j * 3 + 1], z = px[j * 3 + 2];
+      let heat = 0;
+      for (const b of bh) {
+        const d = Math.hypot(x - b.p[0], y - b.p[1], z - b.p[2]);
+        heat = Math.max(heat, 2.5 * b.m / d);
+      }
+      gasGPU[j * 4] = x; gasGPU[j * 4 + 1] = y; gasGPU[j * 4 + 2] = z; gasGPU[j * 4 + 3] = heat;
+    }
+    gl.useProgram(gasProg.p);
+    gl.bindBuffer(gl.ARRAY_BUFFER, gasBuf);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, gasGPU);
+    gl.enableVertexAttribArray(aGas);
+    gl.vertexAttribPointer(aGas, 4, gl.FLOAT, false, 0, 0);
+    gl.uniform2f(gasProg.u.uRes, canvas.width, canvas.height);
+    gl.uniform3fv(gasProg.u.uCamPos, cam);
+    gl.uniformMatrix3fv(gasProg.u.uCamRot, false, rot);
+    gl.uniform4fv(gasProg.u.uBH, bhData);
+    gl.uniform1f(gasProg.u.uBright, 0.3 + 1.4 * gasMass);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.drawArrays(gl.POINTS, 0, N);
+    gl.disableVertexAttribArray(aGas);
+
+    uiClock += realDt;
+    if (uiClock > 0.15) { uiClock = 0; updateUI(); }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
